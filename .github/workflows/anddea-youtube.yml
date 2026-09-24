@@ -13,21 +13,21 @@ jobs:
     env:
       YT_VERSION: "21.13.164"
       APKMD_REPO: "tanishqmanuja/apkmirror-downloader"
-      CLI_REPO: "ReVanced/revanced-cli"
-      ANDDEA_REPO: "anddea/revanced-patches"
+      MORPHE_REPO: "MorpheApp/morphe-desktop"
+      ANDDEA_REPO: "https://github.com/anddea/revanced-patches"
 
     steps:
 
-      # --------------------------------------------------
+      # ==========================================
       # 1. Checkout
-      # --------------------------------------------------
+      # ==========================================
       - name: Checkout
         uses: actions/checkout@v4
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 2. Java 21
-      # --------------------------------------------------
+      # ==========================================
       - name: Setup Java 21
         uses: actions/setup-java@v5
         with:
@@ -35,9 +35,9 @@ jobs:
           java-version: "21"
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 3. Download APKMirror downloader
-      # --------------------------------------------------
+      # ==========================================
       - name: Download APKMirror downloader
         shell: bash
         run: |
@@ -58,7 +58,7 @@ jobs:
           )"
 
           if [ -z "$APKMD_URL" ] || [ "$APKMD_URL" = "null" ]; then
-            echo "ERROR: APKMD binary not found."
+            echo "ERROR: APKMirror downloader not found."
             curl -fsSL "$API" | jq -r '.assets[].name'
             exit 1
           fi
@@ -69,109 +69,106 @@ jobs:
           ./tools/apkmd --help
 
 
-      # --------------------------------------------------
-      # 4. Download latest ReVanced CLI
-      # --------------------------------------------------
-      - name: Download ReVanced CLI
+      # ==========================================
+      # 4. Download latest stable Morphe Desktop
+      # ==========================================
+      - name: Download Morphe Desktop
         shell: bash
         run: |
           set -e
 
-          API="https://api.github.com/repos/${CLI_REPO}/releases/latest"
+          API="https://api.github.com/repos/${MORPHE_REPO}/releases/latest"
 
-          CLI_URL="$(
+          MORPHE_URL="$(
             curl -fsSL "$API" |
             jq -r '
               .assets[]
-              | select(.name | test("revanced-cli-.*-all\\.jar$"))
+              | select(.name | test("morphe-desktop-.*-all\\.jar$"))
               | .browser_download_url
             ' |
             head -n 1
           )"
 
-          if [ -z "$CLI_URL" ] || [ "$CLI_URL" = "null" ]; then
-            echo "ERROR: ReVanced CLI JAR not found."
+          if [ -z "$MORPHE_URL" ] || [ "$MORPHE_URL" = "null" ]; then
+            echo "ERROR: Morphe Desktop JAR not found."
             curl -fsSL "$API" | jq -r '.assets[].name'
             exit 1
           fi
 
-          curl -fL "$CLI_URL" -o tools/revanced-cli.jar
+          curl -fL "$MORPHE_URL" -o tools/morphe-desktop.jar
 
-          ls -lh tools/revanced-cli.jar
-
-
-      # --------------------------------------------------
-      # 5. Download latest Anddea DEV patch bundle
-      # --------------------------------------------------
-      - name: Download Anddea DEV patches
-        shell: bash
-        run: |
-          set -e
-
-          API="https://api.github.com/repos/${ANDDEA_REPO}/releases"
-
-          ANDDEA_URL="$(
-            curl -fsSL "$API" |
-            jq -r '
-              .[]
-              | select(.prerelease == true)
-              | .assets[]
-              | select(.name | test("^patches-.*\\.mpp$"))
-              | .browser_download_url
-            ' |
-            head -n 1
-          )"
-
-          if [ -z "$ANDDEA_URL" ] || [ "$ANDDEA_URL" = "null" ]; then
-            echo "ERROR: Anddea DEV .mpp patch bundle not found."
-            exit 1
-          fi
-
-          echo "Downloading:"
-          echo "$ANDDEA_URL"
-
-          curl -fL "$ANDDEA_URL" -o tools/anddea-dev.mpp
-
-          ls -lh tools/anddea-dev.mpp
+          echo "Morphe Desktop:"
+          ls -lh tools/morphe-desktop.jar
 
 
-      # --------------------------------------------------
-      # 6. Show compatible patches for YouTube 21.13.164
-      # --------------------------------------------------
-      - name: Check Anddea compatibility
+      # ==========================================
+      # 5. Check Anddea DEV compatibility
+      # ==========================================
+      - name: Check Anddea DEV patches
         shell: bash
         run: |
           set -e
 
           echo "=========================================="
-          echo "YouTube version: ${YT_VERSION}"
-          echo "Anddea DEV patch bundle:"
+          echo "Anddea DEV compatibility check"
+          echo "YouTube: ${YT_VERSION}"
           echo "=========================================="
 
-          java -jar tools/revanced-cli.jar \
-            list-patches \
-            -b \
-            -p tools/anddea-dev.mpp \
-            --packages \
-            --versions \
-            | tee compatible-patches.txt
+          java -jar tools/morphe-desktop.jar \
+            list-versions \
+            --patches "$ANDDEA_REPO" \
+            --prerelease \
+            -f com.google.android.youtube \
+            --include-experimental \
+            | tee anddea-versions.txt
 
           echo ""
           echo "=========================================="
-          echo "Checking YouTube 21.13.164"
+          echo "Available Anddea DEV YouTube versions"
           echo "=========================================="
 
-          if grep -F "21.13.164" compatible-patches.txt; then
-            echo "21.13.164 appears in the patch compatibility data."
+          cat anddea-versions.txt
+
+          echo ""
+          echo "Checking for ${YT_VERSION}..."
+
+          if grep -Fq "${YT_VERSION}" anddea-versions.txt; then
+            echo "OK: ${YT_VERSION} is listed by Anddea DEV."
           else
-            echo "WARNING: 21.13.164 was not found in the listed compatibility data."
-            echo "Patch step will determine actual compatibility."
+            echo "WARNING:"
+            echo "${YT_VERSION} is NOT listed as a common compatible version."
+            echo ""
+            echo "The patch step will still run."
+            echo "Morphe will apply only patches compatible with"
+            echo "the supplied APK."
           fi
 
 
-      # --------------------------------------------------
-      # 7. Download YouTube 21.13.164 from APKMirror
-      # --------------------------------------------------
+      # ==========================================
+      # 6. Show Anddea DEV YouTube patches
+      # ==========================================
+      - name: List Anddea DEV YouTube patches
+        shell: bash
+        run: |
+          set -e
+
+          java -jar tools/morphe-desktop.jar \
+            list-patches \
+            --patches "$ANDDEA_REPO" \
+            --prerelease \
+            --with-packages \
+            --with-versions \
+            -f com.google.android.youtube \
+            --include-experimental \
+            > anddea-patches.txt
+
+          echo "Anddea DEV YouTube patches:"
+          cat anddea-patches.txt
+
+
+      # ==========================================
+      # 7. Download YouTube 21.13.164
+      # ==========================================
       - name: Download YouTube 21.13.164
         shell: bash
         run: |
@@ -213,19 +210,22 @@ jobs:
 
           if [ -z "$APK" ]; then
             echo "ERROR: YouTube APK was not downloaded."
-            find downloads -type f -maxdepth 3 || true
+
+            echo "Downloaded files:"
+            find downloads -type f || true
+
             exit 1
           fi
 
           cp "$APK" youtube-original.apk
 
-          echo "Downloaded APK:"
+          echo "Downloaded YouTube APK:"
           ls -lh youtube-original.apk
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 8. Zipalign original APK
-      # --------------------------------------------------
+      # ==========================================
       - name: Optimize APK with Zipalign
         shell: bash
         run: |
@@ -244,6 +244,9 @@ jobs:
             exit 1
           fi
 
+          echo "Using:"
+          echo "$ZIPALIGN"
+
           "$ZIPALIGN" \
             -p \
             -f \
@@ -257,12 +260,13 @@ jobs:
             4 \
             youtube-aligned.apk
 
+          echo "Optimized APK:"
           ls -lh youtube-aligned.apk
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 9. Patch with Anddea DEV
-      # --------------------------------------------------
+      # ==========================================
       - name: Patch YouTube with Anddea DEV
         shell: bash
         run: |
@@ -270,29 +274,40 @@ jobs:
 
           OUTPUT="YT-${YT_VERSION}-Anddea-Dev.apk"
 
-          java -jar tools/revanced-cli.jar \
-            -b \
+          echo "=========================================="
+          echo "PATCHING"
+          echo "YouTube: ${YT_VERSION}"
+          echo "Patch source: Anddea DEV"
+          echo "Architecture: ARM64-v8a"
+          echo "=========================================="
+
+          java -jar tools/morphe-desktop.jar \
             patch \
-            -p tools/anddea-dev.mpp \
-            -o "$OUTPUT" \
+            --patches "$ANDDEA_REPO" \
+            --prerelease \
+            --striplibs arm64-v8a \
+            --bytecode-mode STRIP_SAFE \
+            --verify-with-sdk "$ANDROID_HOME" \
+            --result-file result.json \
+            --out "$OUTPUT" \
             youtube-aligned.apk
 
           if [ ! -f "$OUTPUT" ]; then
-            echo "ERROR: Anddea APK was not created."
+            echo "ERROR: Patched APK was not created."
             exit 1
           fi
 
           echo ""
           echo "=========================================="
-          echo "PATCHED APK CREATED"
+          echo "PATCH SUCCESS"
           echo "=========================================="
 
           ls -lh "$OUTPUT"
 
 
-      # --------------------------------------------------
-      # 10. Verify APK
-      # --------------------------------------------------
+      # ==========================================
+      # 10. Verify final APK
+      # ==========================================
       - name: Verify final APK
         shell: bash
         run: |
@@ -305,7 +320,15 @@ jobs:
             exit 1
           fi
 
+          echo "APK:"
           file "$APK"
+
+          echo ""
+          echo "Size:"
+          ls -lh "$APK"
+
+          echo ""
+          echo "Checking ZIP alignment..."
 
           ZIPALIGN="$(
             find "$ANDROID_HOME/build-tools" \
@@ -318,9 +341,9 @@ jobs:
           "$ZIPALIGN" -c -v 4 "$APK" || true
 
 
-      # --------------------------------------------------
+      # ==========================================
       # 11. Upload APK artifact
-      # --------------------------------------------------
+      # ==========================================
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -329,21 +352,35 @@ jobs:
           if-no-files-found: error
 
 
-      # --------------------------------------------------
-      # 12. Upload compatibility log
-      # --------------------------------------------------
-      - name: Upload compatibility log
+      # ==========================================
+      # 12. Upload patch result
+      # ==========================================
+      - name: Upload patch result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anddea-Result-${{ env.YT_VERSION }}
+          path: result.json
+          if-no-files-found: warn
+
+
+      # ==========================================
+      # 13. Upload compatibility information
+      # ==========================================
+      - name: Upload Anddea compatibility logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Anddea-Compatibility-${{ env.YT_VERSION }}
-          path: compatible-patches.txt
+          path: |
+            anddea-versions.txt
+            anddea-patches.txt
           if-no-files-found: warn
 
 
-      # --------------------------------------------------
-      # 13. GitHub Beta Release
-      # --------------------------------------------------
+      # ==========================================
+      # 14. Create GitHub Pre-release
+      # ==========================================
       - name: Create GitHub Anddea DEV Release
         uses: softprops/action-gh-release@v2
         with:
@@ -354,7 +391,7 @@ jobs:
           body: |
             YouTube ${{ env.YT_VERSION }}
 
-            Patched with latest Anddea DEV patches.
+            Patched with Anddea DEV patches.
 
             Architecture:
             ARM64-v8a
@@ -362,8 +399,11 @@ jobs:
             APK source:
             APKMirror
 
-            Optimization:
-            Zipaligned
+            APK optimized:
+            Yes
+
+            Zipaligned:
+            Yes
 
             Patch channel:
             Anddea DEV
