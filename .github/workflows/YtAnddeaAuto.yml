@@ -1,0 +1,484 @@
+name: Auto Anddea Beta → YouTube 21.13.164 → ARM64 Release
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    env:
+      APKMD_REPO: "tanishqmanuja/apkmirror-downloader"
+      MORPHE_REPO: "MorpheApp/morphe-desktop"
+      PATCHES_REPO: "https://github.com/anddea/revanced-patches"
+      YT_VERSION: "21.13.164"
+
+    steps:
+
+      # -------------------------------------------------------
+      # Checkout
+      # -------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -------------------------------------------------------
+      # Check Anddea Dev Patch
+      # -------------------------------------------------------
+      - name: Check Anddea Dev Patch
+        id: patch_check
+        shell: bash
+        run: |
+          set -e
+
+          echo "Checking latest Anddea Dev patch..."
+
+          PATCH_VERSION="$(
+            curl -fsSL \
+              "https://api.github.com/repos/anddea/revanced-patches/releases?per_page=30" |
+            jq -r '
+              [
+                .[]
+                | select(.prerelease == true)
+                | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.[0-9]+$"))
+              ]
+              | sort_by(.published_at)
+              | last
+              | .tag_name
+            '
+          )"
+
+          if [ -z "$PATCH_VERSION" ] || [ "$PATCH_VERSION" = "null" ]; then
+            echo "ERROR: Could not detect latest Anddea Dev patch."
+            exit 1
+          fi
+
+          PATCH_VERSION="${PATCH_VERSION#v}"
+
+          echo "Latest Anddea Dev patch:"
+          echo "$PATCH_VERSION"
+
+          echo "PATCH_VERSION=$PATCH_VERSION" >> "$GITHUB_ENV"
+
+          if [ -f ".anddea-patch-version" ]; then
+            CURRENT_PATCH="$(cat .anddea-patch-version)"
+          else
+            CURRENT_PATCH=""
+          fi
+
+          echo "Current recorded patch:"
+          echo "${CURRENT_PATCH:-none}"
+
+          # Manual workflow_dispatch = always build
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual run detected."
+            echo "Forcing build."
+
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Scheduled run
+          if [ "$PATCH_VERSION" = "$CURRENT_PATCH" ]; then
+            echo ""
+            echo "No new Anddea Dev patch."
+            echo "Current: $CURRENT_PATCH"
+            echo "Latest: $PATCH_VERSION"
+            echo "Skipping build."
+
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo ""
+          echo "NEW ANDDEA DEV PATCH DETECTED!"
+          echo "Old: ${CURRENT_PATCH:-none}"
+          echo "New: $PATCH_VERSION"
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # -------------------------------------------------------
+      # Stop if no new patch
+      # -------------------------------------------------------
+      - name: Stop if no new patch
+        if: steps.patch_check.outputs.changed != 'true'
+        run: |
+          echo "No new Anddea patch. Nothing to build."
+
+      # -------------------------------------------------------
+      # Java 21
+      # -------------------------------------------------------
+      - name: Setup Java 21
+        if: steps.patch_check.outputs.changed == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # -------------------------------------------------------
+      # Download APKMirror downloader
+      # -------------------------------------------------------
+      - name: Download APKMirror downloader
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          mkdir -p tools downloads
+
+          API="https://api.github.com/repos/${APKMD_REPO}/releases/latest"
+
+          APKMD_URL="$(
+            curl -fsSL "$API" |
+            jq -r '.assets[]
+              | select(.name == "apkmd")
+              | .browser_download_url' |
+            head -n 1
+          )"
+
+          if [ -z "$APKMD_URL" ] || [ "$APKMD_URL" = "null" ]; then
+            echo "ERROR: APKMD binary not found."
+
+            echo "Available assets:"
+            curl -fsSL "$API" |
+              jq -r '.assets[].name'
+
+            exit 1
+          fi
+
+          echo "Downloading APKMD:"
+          echo "$APKMD_URL"
+
+          curl -fL "$APKMD_URL" \
+            -o tools/apkmd
+
+          chmod +x tools/apkmd
+
+          echo "APKMD:"
+          ./tools/apkmd --help
+
+      # -------------------------------------------------------
+      # Download Morphe Desktop
+      # -------------------------------------------------------
+      - name: Download Morphe Desktop
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          API="https://api.github.com/repos/${MORPHE_REPO}/releases/latest"
+
+          MORPHE_URL="$(
+            curl -fsSL "$API" |
+            jq -r '.assets[]
+              | select(.name | test("morphe-desktop-.*-all\\.jar$"))
+              | .browser_download_url' |
+            head -n 1
+          )"
+
+          if [ -z "$MORPHE_URL" ] || [ "$MORPHE_URL" = "null" ]; then
+            echo "ERROR: Morphe Desktop JAR not found."
+
+            echo "Available assets:"
+            curl -fsSL "$API" |
+              jq -r '.assets[].name'
+
+            exit 1
+          fi
+
+          echo "Downloading Morphe Desktop:"
+          echo "$MORPHE_URL"
+
+          curl -fL "$MORPHE_URL" \
+            -o tools/morphe-desktop.jar
+
+          echo "Morphe Desktop:"
+          ls -lh tools/morphe-desktop.jar
+
+      # -------------------------------------------------------
+      # Confirm versions
+      # -------------------------------------------------------
+      - name: Confirm Build Versions
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================="
+          echo "Build Information"
+          echo "========================================="
+          echo "YouTube Version : $YT_VERSION"
+          echo "Anddea Patches  : $PATCH_VERSION"
+          echo "Architecture    : ARM64-v8a"
+          echo "========================================="
+
+      # -------------------------------------------------------
+      # Download YouTube from APKMirror
+      # -------------------------------------------------------
+      - name: Download YouTube from APKMirror
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          rm -rf downloads
+          mkdir -p downloads
+
+          cat > apps.json <<EOF
+          {
+            "options": {
+              "arch": "arm64-v8a",
+              "fallbackArch": "universal",
+              "dpi": "nodpi",
+              "outDir": "downloads"
+            },
+            "apps": [
+              {
+                "org": "google-inc",
+                "repo": "youtube",
+                "version": "${YT_VERSION}",
+                "arch": "arm64-v8a",
+                "fallbackArch": "universal",
+                "dpi": "nodpi",
+                "outFile": "youtube-${YT_VERSION}"
+              }
+            ]
+          }
+          EOF
+
+          echo "APKMD configuration:"
+          cat apps.json
+
+          echo ""
+          echo "Downloading YouTube ${YT_VERSION}..."
+
+          ./tools/apkmd apps.json
+
+          echo ""
+          echo "Downloaded files:"
+          find downloads -type f -print
+
+          APK="$(
+            find downloads \
+              -type f \
+              -name "*.apk" |
+            head -n 1
+          )"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: YouTube APK was not downloaded."
+            exit 1
+          fi
+
+          cp "$APK" youtube-original.apk
+
+          echo ""
+          echo "Original YouTube APK:"
+          ls -lh youtube-original.apk
+
+      # -------------------------------------------------------
+      # Optimize / align APK
+      # -------------------------------------------------------
+      - name: Optimize APK with Zipalign
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          ZIPALIGN="$(
+            find "$ANDROID_HOME/build-tools" \
+              -type f \
+              -name "zipalign" |
+            sort -V |
+            tail -n 1
+          )"
+
+          if [ -z "$ZIPALIGN" ]; then
+            echo "ERROR: zipalign not found."
+            exit 1
+          fi
+
+          echo "Using zipalign:"
+          echo "$ZIPALIGN"
+
+          "$ZIPALIGN" \
+            -p \
+            -f \
+            4 \
+            youtube-original.apk \
+            youtube-aligned.apk
+
+          echo ""
+          echo "Checking alignment..."
+
+          "$ZIPALIGN" \
+            -c \
+            -v \
+            4 \
+            youtube-aligned.apk
+
+          echo ""
+          echo "Aligned APK:"
+          ls -lh youtube-aligned.apk
+
+      # -------------------------------------------------------
+      # Patch with Anddea Dev patches
+      # -------------------------------------------------------
+      - name: Patch YouTube with Anddea Beta
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          echo "========================================="
+          echo "Starting Anddea Beta patch"
+          echo "========================================="
+          echo "YouTube: ${YT_VERSION}"
+          echo "Patches: ${PATCH_VERSION}"
+          echo "========================================="
+
+          FINAL_APK="YT-${YT_VERSION}-Anddea-Beta-Patches-${PATCH_VERSION}.apk"
+
+          java -jar tools/morphe-desktop.jar \
+            patch \
+            -p "$PATCHES_REPO" \
+            --prerelease \
+            -o "$FINAL_APK" \
+            -r "result.json" \
+            --striplibs "arm64-v8a" \
+            --bytecode-mode "STRIP_SAFE" \
+            youtube-aligned.apk
+
+          if [ ! -f "$FINAL_APK" ]; then
+            echo "ERROR: Anddea Beta APK was not created."
+            exit 1
+          fi
+
+          echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
+
+          echo ""
+          echo "========================================="
+          echo "Anddea Beta patch successful"
+          echo "========================================="
+
+          ls -lh "$FINAL_APK"
+
+      # -------------------------------------------------------
+      # Verify final APK
+      # -------------------------------------------------------
+      - name: Verify final APK
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          APK="$FINAL_APK"
+
+          if [ ! -f "$APK" ]; then
+            echo "ERROR: Final APK not found."
+            exit 1
+          fi
+
+          echo "Final APK:"
+          ls -lh "$APK"
+
+          echo ""
+          echo "APK information:"
+          file "$APK"
+
+      # -------------------------------------------------------
+      # Upload APK artifact
+      # -------------------------------------------------------
+      - name: Upload APK artifact
+        if: steps.patch_check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: YT-${{ env.YT_VERSION }}-Anddea-Beta-Patches-${{ env.PATCH_VERSION }}
+          path: ${{ env.FINAL_APK }}
+          if-no-files-found: error
+
+      # -------------------------------------------------------
+      # Upload Anddea result
+      # -------------------------------------------------------
+      - name: Upload Anddea patch result
+        if: steps.patch_check.outputs.changed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Anddea-result-${{ env.YT_VERSION }}-${{ env.PATCH_VERSION }}
+          path: result.json
+          if-no-files-found: warn
+
+      # -------------------------------------------------------
+      # Create GitHub Release
+      # -------------------------------------------------------
+      - name: Create GitHub Anddea Beta Release
+        if: steps.patch_check.outputs.changed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: yt-${{ env.YT_VERSION }}-anddea-beta-${{ env.PATCH_VERSION }}
+          name: YT ${{ env.YT_VERSION }} Anddea Beta - Patches ${{ env.PATCH_VERSION }}
+
+          # NORMAL RELEASE
+          prerelease: false
+
+          body: |
+            YouTube ${{ env.YT_VERSION }}
+
+            Patched with Anddea Beta patches.
+
+            Anddea DEV Patches:
+            ${{ env.PATCH_VERSION }}
+
+            Architecture:
+            ARM64-v8a
+
+            Optimized:
+            Yes
+
+            Zipaligned:
+            Yes
+
+            Source:
+            APKMirror
+
+            Build:
+            Anddea Beta
+
+          files: |
+            ${{ env.FINAL_APK }}
+
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # -------------------------------------------------------
+      # Save successfully built patch version
+      # -------------------------------------------------------
+      - name: Save Anddea Patch Version
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -e
+
+          echo "$PATCH_VERSION" > .anddea-patch-version
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .anddea-patch-version
+
+          if git diff --cached --quiet; then
+            echo "Patch version already saved."
+            exit 0
+          fi
+
+          git commit \
+            -m "chore: update Anddea patch to ${PATCH_VERSION}"
+
+          git push
