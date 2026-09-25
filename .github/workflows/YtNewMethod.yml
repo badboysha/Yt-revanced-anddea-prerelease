@@ -1,4 +1,4 @@
-name: Experimental → Anddea Beta Patch → ARM64 Release
+name: Anddea Beta Patch → ARM64 Release
 
 on:
   workflow_dispatch:
