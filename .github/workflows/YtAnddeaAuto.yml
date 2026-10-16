@@ -2,7 +2,6 @@ name: Anddea Beta - YouTube 21.39.525 ARM64
 
 on:
   workflow_dispatch:
-
   schedule:
     - cron: "0 0 * * *"
 
@@ -18,9 +17,9 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      APKMD_REPO: "tanishqmanuja/apkmirror-downloader"
-      MORPHE_REPO: "MorpheApp/morphe-desktop"
-      PATCHES_REPO: "https://github.com/anddea/revanced-patches"
+      APKMD_REPO: tanishqmanuja/apkmirror-downloader
+      MORPHE_REPO: MorpheApp/morphe-desktop
+      PATCHES_REPO: https://github.com/anddea/revanced-patches
       YT_VERSION: "21.39.525"
 
     steps:
@@ -33,7 +32,7 @@ jobs:
           fetch-depth: 0
 
       # -------------------------------------------------------
-      # Detect latest Anddea Dev patch
+      # Detect Anddea development patch
       # -------------------------------------------------------
       - name: Check Anddea Dev Patch
         id: patch_check
@@ -62,7 +61,7 @@ jobs:
           )"
 
           if [ -z "$PATCH_VERSION" ]; then
-            echo "ERROR: No matching Anddea Dev release found."
+            echo "::error::No matching Anddea Dev release found."
             exit 1
           fi
 
@@ -77,16 +76,13 @@ jobs:
             CURRENT_PATCH="$(tr -d '[:space:]' < .anddea-patch-version)"
           fi
 
-          echo "Previously recorded patch: ${CURRENT_PATCH:-none}"
-
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
-            echo "Manual build requested."
             echo "changed=true" >> "$GITHUB_OUTPUT"
           elif [ "$PATCH_VERSION" = "$CURRENT_PATCH" ]; then
-            echo "No new Anddea patch."
+            echo "No new patch detected."
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
-            echo "New Anddea patch detected."
+            echo "New patch detected."
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -101,7 +97,7 @@ jobs:
           java-version: "21"
 
       # -------------------------------------------------------
-      # Android SDK and Build Tools
+      # ANDROID SDK - FIXED SETUP
       # -------------------------------------------------------
       - name: Setup Android SDK
         if: steps.patch_check.outputs.changed == 'true'
@@ -111,7 +107,10 @@ jobs:
           log-accepted-android-sdk-licenses: "false"
           packages: "platform-tools,build-tools;35.0.0"
 
-      - name: Verify Android Build Tools
+      # -------------------------------------------------------
+      # Verify SDK and locate tools
+      # -------------------------------------------------------
+      - name: Verify Android SDK
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
@@ -120,28 +119,47 @@ jobs:
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
           if [ -z "$SDK_ROOT" ] || [ ! -d "$SDK_ROOT" ]; then
-            echo "ERROR: Android SDK directory not found."
+            echo "::error::Android SDK root is missing."
             echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
             echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
             exit 1
           fi
 
-          ZIPALIGN="$SDK_ROOT/build-tools/35.0.0/zipalign"
+          SDKMANAGER="$(command -v sdkmanager || true)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager is not on PATH."
+            exit 1
+          fi
+
+          BUILD_TOOLS="$SDK_ROOT/build-tools/35.0.0"
+          ZIPALIGN="$BUILD_TOOLS/zipalign"
+          AAPT="$BUILD_TOOLS/aapt"
 
           if [ ! -x "$ZIPALIGN" ]; then
-            echo "ERROR: zipalign not found at $ZIPALIGN"
+            echo "::error::zipalign is missing: $ZIPALIGN"
+            exit 1
+          fi
+
+          if [ ! -x "$AAPT" ]; then
+            echo "::error::aapt is missing: $AAPT"
             exit 1
           fi
 
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ZIPALIGN=$ZIPALIGN" >> "$GITHUB_ENV"
+          echo "AAPT=$AAPT" >> "$GITHUB_ENV"
+
+          echo "SDK root: $SDK_ROOT"
+          echo "SDK Manager: $SDKMANAGER"
+          echo "Build Tools: $BUILD_TOOLS"
 
           "$ZIPALIGN" -h || true
 
           echo "Android SDK verification successful."
 
       # -------------------------------------------------------
-      # Download APKMirror Downloader
+      # Download APKMD
       # -------------------------------------------------------
       - name: Download APKMD
         if: steps.patch_check.outputs.changed == 'true'
@@ -164,10 +182,8 @@ jobs:
           )"
 
           if [ -z "$APKMD_URL" ] || [ "$APKMD_URL" = "null" ]; then
-            echo "ERROR: APKMD binary not found."
-
+            echo "::error::APKMD binary not found."
             jq -r '.assets[].name' apkmd-release.json
-
             exit 1
           fi
 
@@ -179,7 +195,6 @@ jobs:
             -o tools/apkmd
 
           chmod +x tools/apkmd
-
           ./tools/apkmd --help
 
       # -------------------------------------------------------
@@ -204,10 +219,8 @@ jobs:
           )"
 
           if [ -z "$MORPHE_URL" ] || [ "$MORPHE_URL" = "null" ]; then
-            echo "ERROR: Morphe Desktop JAR not found."
-
+            echo "::error::Morphe Desktop JAR not found."
             jq -r '.assets[].name' morphe-release.json
-
             exit 1
           fi
 
@@ -221,7 +234,7 @@ jobs:
           java -jar tools/morphe-desktop.jar --version
 
       # -------------------------------------------------------
-      # Download YouTube APK
+      # Download YouTube APK with retries
       # -------------------------------------------------------
       - name: Download YouTube from APKMirror
         if: steps.patch_check.outputs.changed == 'true'
@@ -248,21 +261,16 @@ jobs:
                 "arch": "arm64-v8a",
                 "fallbackArch": "universal",
                 "dpi": "nodpi",
-                "outFile": "youtube-${YT_VERSION}",
-                "overwrite": true
+                "outFile": "youtube-${YT_VERSION}"
               }
             ]
           }
           EOF
 
-          echo "APKMD configuration:"
-          cat apps.json
-
           DOWNLOAD_SUCCESS=false
 
           for attempt in 1 2 3; do
-            echo ""
-            echo "Download attempt $attempt/3"
+            echo "APK download attempt $attempt/3"
 
             find downloads -mindepth 1 -delete
 
@@ -274,14 +282,13 @@ jobs:
               if [ "${#APK_FILES[@]}" -eq 1 ] &&
                  [ -s "${APK_FILES[0]}" ]; then
                 cp "${APK_FILES[0]}" youtube-original.apk
-
                 DOWNLOAD_SUCCESS=true
                 break
               fi
 
               echo "Expected one APK; found ${#APK_FILES[@]}."
             else
-              echo "APKMD download attempt failed."
+              echo "APKMD download failed."
             fi
 
             if [ "$attempt" -lt 3 ]; then
@@ -290,8 +297,7 @@ jobs:
           done
 
           if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
-            echo "ERROR: YouTube download failed after 3 attempts."
-            echo "APKMD could not obtain a single valid APK."
+            echo "::error::YouTube APK download failed after three attempts."
             exit 1
           fi
 
@@ -308,10 +314,7 @@ jobs:
 
           test -s youtube-original.apk
 
-          sudo apt-get update
-          sudo apt-get install -y aapt
-
-          aapt dump badging youtube-original.apk \
+          "$AAPT" dump badging youtube-original.apk \
             | tee youtube-metadata.txt
 
           grep -Fq \
@@ -346,7 +349,7 @@ jobs:
             youtube-original.apk
 
           if [ ! -s "$FINAL_APK" ]; then
-            echo "ERROR: Patched APK was not created."
+            echo "::error::Patched APK was not created."
             exit 1
           fi
 
@@ -355,16 +358,16 @@ jobs:
           ls -lh "$FINAL_APK"
 
       # -------------------------------------------------------
-      # Validate patch result
+      # Verify patch result
       # -------------------------------------------------------
-      - name: Validate Patch Result
+      - name: Verify Patch Result
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
           set -euo pipefail
 
           if [ ! -s result.json ]; then
-            echo "ERROR: result.json missing."
+            echo "::error::Patch result JSON is missing."
             exit 1
           fi
 
@@ -409,7 +412,7 @@ jobs:
 
           test -s "$FINAL_APK"
 
-          aapt dump badging "$FINAL_APK" \
+          "$AAPT" dump badging "$FINAL_APK" \
             | tee final-apk-metadata.txt
 
           grep -Fq \
@@ -445,7 +448,7 @@ jobs:
           retention-days: 14
 
       # -------------------------------------------------------
-      # Create or update GitHub Release
+      # Create or update release
       # -------------------------------------------------------
       - name: Create GitHub Anddea Beta Release
         if: steps.patch_check.outputs.changed == 'true'
@@ -455,20 +458,19 @@ jobs:
           name: YouTube ${{ env.YT_VERSION }} Anddea Beta - ${{ env.PATCH_VERSION }}
           prerelease: false
           body: |
-            YouTube Version: ${{ env.YT_VERSION }}
+            YouTube: ${{ env.YT_VERSION }}
 
-            Patches: Anddea Development
-            Patch Version: ${{ env.PATCH_VERSION }}
+            Patch repository: anddea/revanced-patches
+            Anddea Dev patch: ${{ env.PATCH_VERSION }}
 
             Architecture: ARM64-v8a
             Source: APKMirror
-
             Build: GitHub Actions
+
             APK: Zipaligned and verified
 
           files: ${{ env.FINAL_APK }}
           fail_on_unmatched_files: true
-
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
