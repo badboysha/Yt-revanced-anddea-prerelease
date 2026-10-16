@@ -1,4 +1,4 @@
-name: Auto Anddea Beta → YouTube 21.13.164 → ARM64 Release
+name: Auto Anddea Beta → YouTube 21.39.525 → ARM64 Release
 
 on:
   workflow_dispatch:
