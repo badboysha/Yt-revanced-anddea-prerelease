@@ -17,7 +17,7 @@ jobs:
       APKMD_REPO: "tanishqmanuja/apkmirror-downloader"
       MORPHE_REPO: "MorpheApp/morphe-desktop"
       PATCHES_REPO: "https://github.com/anddea/revanced-patches"
-      YT_VERSION: "21.13.164"
+      YT_VERSION: "21.39.525"
 
     steps:
 
