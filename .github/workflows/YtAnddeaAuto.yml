@@ -1,4 +1,4 @@
-name: Auto Anddea Beta → YouTube 21.39.525 → ARM64 Release
+name: Anddea Beta - YouTube 21.39.525 ARM64
 
 on:
   workflow_dispatch:
@@ -8,6 +8,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: anddea-youtube-build
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -20,7 +24,6 @@ jobs:
       YT_VERSION: "21.39.525"
 
     steps:
-
       # -------------------------------------------------------
       # Checkout
       # -------------------------------------------------------
@@ -30,90 +33,68 @@ jobs:
           fetch-depth: 0
 
       # -------------------------------------------------------
-      # Check Anddea Dev Patch
+      # Detect latest Anddea development patch
       # -------------------------------------------------------
       - name: Check Anddea Dev Patch
         id: patch_check
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "Checking latest Anddea Dev patch..."
+          echo "Checking Anddea development releases..."
+
+          curl -fsSL \
+            "https://api.github.com/repos/anddea/revanced-patches/releases?per_page=100" \
+            -o releases.json
 
           PATCH_VERSION="$(
-            curl -fsSL \
-              "https://api.github.com/repos/anddea/revanced-patches/releases?per_page=30" |
             jq -r '
               [
                 .[]
                 | select(.prerelease == true)
-                | select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.[0-9]+$"))
+                | select(
+                    .tag_name
+                    | test("^v?[0-9]+\\.[0-9]+\\.[0-9]+-dev\\.[0-9]+$")
+                  )
               ]
               | sort_by(.published_at)
               | last
-              | .tag_name
-            '
+              | .tag_name // empty
+            ' releases.json
           )"
 
-          if [ -z "$PATCH_VERSION" ] || [ "$PATCH_VERSION" = "null" ]; then
-            echo "ERROR: Could not detect latest Anddea Dev patch."
+          if [ -z "$PATCH_VERSION" ]; then
+            echo "ERROR: No matching Anddea development release found."
+            echo "Check the repository release tags."
             exit 1
           fi
 
           PATCH_VERSION="${PATCH_VERSION#v}"
 
-          echo "Latest Anddea Dev patch:"
-          echo "$PATCH_VERSION"
-
+          echo "Latest patch: $PATCH_VERSION"
           echo "PATCH_VERSION=$PATCH_VERSION" >> "$GITHUB_ENV"
 
-          if [ -f ".anddea-patch-version" ]; then
-            CURRENT_PATCH="$(cat .anddea-patch-version)"
-          else
-            CURRENT_PATCH=""
+          CURRENT_PATCH=""
+
+          if [ -f .anddea-patch-version ]; then
+            CURRENT_PATCH="$(tr -d '[:space:]' < .anddea-patch-version)"
           fi
 
-          echo "Current recorded patch:"
-          echo "${CURRENT_PATCH:-none}"
+          echo "Previously built patch: ${CURRENT_PATCH:-none}"
 
-          # Manual workflow_dispatch = always build
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "Manual run detected."
-            echo "Forcing build."
-
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "Manual build requested."
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Scheduled run
-          if [ "$PATCH_VERSION" = "$CURRENT_PATCH" ]; then
-            echo ""
-            echo "No new Anddea Dev patch."
-            echo "Current: $CURRENT_PATCH"
-            echo "Latest: $PATCH_VERSION"
-            echo "Skipping build."
-
+          elif [ "$PATCH_VERSION" = "$CURRENT_PATCH" ]; then
+            echo "No new patch. Skipping build."
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          else
+            echo "New patch detected."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
-          echo ""
-          echo "NEW ANDDEA DEV PATCH DETECTED!"
-          echo "Old: ${CURRENT_PATCH:-none}"
-          echo "New: $PATCH_VERSION"
-
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-
       # -------------------------------------------------------
-      # Stop if no new patch
-      # -------------------------------------------------------
-      - name: Stop if no new patch
-        if: steps.patch_check.outputs.changed != 'true'
-        run: |
-          echo "No new Anddea patch. Nothing to build."
-
-      # -------------------------------------------------------
-      # Java 21
+      # Setup Java
       # -------------------------------------------------------
       - name: Setup Java 21
         if: steps.patch_check.outputs.changed == 'true'
@@ -123,45 +104,63 @@ jobs:
           java-version: "21"
 
       # -------------------------------------------------------
-      # Download APKMirror downloader
+      # Setup Android SDK
       # -------------------------------------------------------
-      - name: Download APKMirror downloader
+      - name: Setup Android SDK
+        if: steps.patch_check.outputs.changed == 'true'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android Build Tools
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
+          sdkmanager "build-tools;35.0.0"
+
+          ZIPALIGN="$ANDROID_HOME/build-tools/35.0.0/zipalign"
+
+          test -x "$ZIPALIGN"
+
+          echo "ZIPALIGN=$ZIPALIGN" >> "$GITHUB_ENV"
+
+      # -------------------------------------------------------
+      # Download APKMirror downloader
+      # -------------------------------------------------------
+      - name: Download APKMD
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
 
           mkdir -p tools downloads
 
           API="https://api.github.com/repos/${APKMD_REPO}/releases/latest"
 
+          curl -fsSL "$API" -o apkmd-release.json
+
           APKMD_URL="$(
-            curl -fsSL "$API" |
-            jq -r '.assets[]
+            jq -r '
+              .assets[]
               | select(.name == "apkmd")
-              | .browser_download_url' |
-            head -n 1
+              | .browser_download_url
+            ' apkmd-release.json | head -n 1
           )"
 
           if [ -z "$APKMD_URL" ] || [ "$APKMD_URL" = "null" ]; then
             echo "ERROR: APKMD binary not found."
-
-            echo "Available assets:"
-            curl -fsSL "$API" |
-              jq -r '.assets[].name'
-
+            jq -r '.assets[].name' apkmd-release.json
             exit 1
           fi
 
-          echo "Downloading APKMD:"
-          echo "$APKMD_URL"
-
-          curl -fL "$APKMD_URL" \
+          curl --retry 3 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            -fL "$APKMD_URL" \
             -o tools/apkmd
 
           chmod +x tools/apkmd
 
-          echo "APKMD:"
           ./tools/apkmd --help
 
       # -------------------------------------------------------
@@ -171,62 +170,65 @@ jobs:
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           API="https://api.github.com/repos/${MORPHE_REPO}/releases/latest"
 
+          curl -fsSL "$API" -o morphe-release.json
+
           MORPHE_URL="$(
-            curl -fsSL "$API" |
-            jq -r '.assets[]
+            jq -r '
+              .assets[]
               | select(.name | test("morphe-desktop-.*-all\\.jar$"))
-              | .browser_download_url' |
-            head -n 1
+              | .browser_download_url
+            ' morphe-release.json | head -n 1
           )"
 
           if [ -z "$MORPHE_URL" ] || [ "$MORPHE_URL" = "null" ]; then
             echo "ERROR: Morphe Desktop JAR not found."
-
-            echo "Available assets:"
-            curl -fsSL "$API" |
-              jq -r '.assets[].name'
-
+            jq -r '.assets[].name' morphe-release.json
             exit 1
           fi
 
-          echo "Downloading Morphe Desktop:"
-          echo "$MORPHE_URL"
-
-          curl -fL "$MORPHE_URL" \
+          curl --retry 3 \
+            --retry-all-errors \
+            --retry-delay 3 \
+            -fL "$MORPHE_URL" \
             -o tools/morphe-desktop.jar
 
-          echo "Morphe Desktop:"
-          ls -lh tools/morphe-desktop.jar
+          java -jar tools/morphe-desktop.jar --version
 
       # -------------------------------------------------------
-      # Confirm versions
+      # Verify compatible patch versions
       # -------------------------------------------------------
-      - name: Confirm Build Versions
+      - name: Check YouTube Patch Compatibility
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "========================================="
-          echo "Build Information"
-          echo "========================================="
-          echo "YouTube Version : $YT_VERSION"
-          echo "Anddea Patches  : $PATCH_VERSION"
-          echo "Architecture    : ARM64-v8a"
-          echo "========================================="
+          java -jar tools/morphe-desktop.jar \
+            list-versions \
+            --patches "$PATCHES_REPO" \
+            --prerelease \
+            --filter-package-names com.google.android.youtube \
+            | tee compatible-versions.txt
+
+          if ! grep -Fq "$YT_VERSION" compatible-versions.txt; then
+            echo "ERROR: YouTube $YT_VERSION was not found in the"
+            echo "development patches' compatible-version list."
+            echo "Review compatible-versions.txt before proceeding."
+            exit 1
+          fi
 
       # -------------------------------------------------------
-      # Download YouTube from APKMirror
+      # Download YouTube APK with retries
       # -------------------------------------------------------
       - name: Download YouTube from APKMirror
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           rm -rf downloads
           mkdir -p downloads
@@ -253,167 +255,206 @@ jobs:
           }
           EOF
 
-          echo "APKMD configuration:"
-          cat apps.json
+          echo "Requested YouTube version: $YT_VERSION"
 
-          echo ""
-          echo "Downloading YouTube ${YT_VERSION}..."
+          DOWNLOAD_SUCCESS=false
 
-          ./tools/apkmd apps.json
+          for attempt in 1 2 3; do
+            echo ""
+            echo "========================================="
+            echo "Download attempt $attempt/3"
+            echo "========================================="
 
-          echo ""
-          echo "Downloaded files:"
-          find downloads -type f -print
+            rm -f downloads/*
 
-          APK="$(
-            find downloads \
-              -type f \
-              -name "*.apk" |
-            head -n 1
-          )"
+            if ./tools/apkmd apps.json; then
+              APK_COUNT="$(
+                find downloads -type f -name '*.apk' | wc -l
+              )"
 
-          if [ -z "$APK" ]; then
-            echo "ERROR: YouTube APK was not downloaded."
+              if [ "$APK_COUNT" -eq 1 ]; then
+                APK="$(find downloads -type f -name '*.apk' -print -quit)"
+
+                if [ -s "$APK" ]; then
+                  DOWNLOAD_SUCCESS=true
+                  break
+                fi
+              else
+                echo "Expected one APK, found: $APK_COUNT"
+              fi
+            else
+              echo "APKMD failed on attempt $attempt."
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              echo "Waiting 20 seconds before retry..."
+              sleep 20
+            fi
+          done
+
+          if [ "$DOWNLOAD_SUCCESS" != "true" ]; then
+            echo ""
+            echo "ERROR: APKMirror download failed after 3 attempts."
+            echo "APKMD could not obtain a valid APK."
+            echo "Inspect the APKMirror page and redirect response."
             exit 1
           fi
 
           cp "$APK" youtube-original.apk
 
-          echo ""
-          echo "Original YouTube APK:"
+          echo "Downloaded APK:"
           ls -lh youtube-original.apk
 
       # -------------------------------------------------------
-      # Optimize / align APK
+      # Verify APK structure and package/version
       # -------------------------------------------------------
-      - name: Optimize APK with Zipalign
+      - name: Verify Original YouTube APK
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          ZIPALIGN="$(
-            find "$ANDROID_HOME/build-tools" \
-              -type f \
-              -name "zipalign" |
-            sort -V |
-            tail -n 1
-          )"
+          test -s youtube-original.apk
 
-          if [ -z "$ZIPALIGN" ]; then
-            echo "ERROR: zipalign not found."
-            exit 1
-          fi
+          sudo apt-get update
+          sudo apt-get install -y aapt
 
-          echo "Using zipalign:"
-          echo "$ZIPALIGN"
+          aapt dump badging youtube-original.apk \
+            | tee youtube-metadata.txt
 
-          "$ZIPALIGN" \
-            -p \
-            -f \
-            4 \
-            youtube-original.apk \
-            youtube-aligned.apk
+          grep -Fq \
+            "package: name='com.google.android.youtube'" \
+            youtube-metadata.txt
 
-          echo ""
-          echo "Checking alignment..."
+          grep -Fq "versionName='${YT_VERSION}'" \
+            youtube-metadata.txt
 
-          "$ZIPALIGN" \
-            -c \
-            -v \
-            4 \
-            youtube-aligned.apk
-
-          echo ""
-          echo "Aligned APK:"
-          ls -lh youtube-aligned.apk
+          echo "Original APK package and version verified."
 
       # -------------------------------------------------------
-      # Patch with Anddea Dev patches
+      # Patch YouTube with Anddea Dev
       # -------------------------------------------------------
-      - name: Patch YouTube with Anddea Beta
+      - name: Patch YouTube with Anddea Dev
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          echo "========================================="
-          echo "Starting Anddea Beta patch"
-          echo "========================================="
-          echo "YouTube: ${YT_VERSION}"
-          echo "Patches: ${PATCH_VERSION}"
-          echo "========================================="
-
-          FINAL_APK="YT-${YT_VERSION}-Anddea-Beta-Patches-${PATCH_VERSION}.apk"
+          FINAL_APK="YT-${YT_VERSION}-Anddea-Beta-${PATCH_VERSION}.apk"
 
           java -jar tools/morphe-desktop.jar \
             patch \
-            -p "$PATCHES_REPO" \
+            --patches "$PATCHES_REPO" \
             --prerelease \
-            -o "$FINAL_APK" \
-            -r "result.json" \
-            --striplibs "arm64-v8a" \
-            --bytecode-mode "STRIP_SAFE" \
-            youtube-aligned.apk
+            --out "$FINAL_APK" \
+            --result-file result.json \
+            --striplibs arm64-v8a \
+            --bytecode-mode STRIP_SAFE \
+            youtube-original.apk
 
-          if [ ! -f "$FINAL_APK" ]; then
-            echo "ERROR: Anddea Beta APK was not created."
+          if [ ! -s "$FINAL_APK" ]; then
+            echo "ERROR: Patched APK was not created."
             exit 1
           fi
 
           echo "FINAL_APK=$FINAL_APK" >> "$GITHUB_ENV"
 
-          echo ""
-          echo "========================================="
-          echo "Anddea Beta patch successful"
-          echo "========================================="
-
           ls -lh "$FINAL_APK"
 
       # -------------------------------------------------------
-      # Verify final APK
+      # Verify patch result
       # -------------------------------------------------------
-      - name: Verify final APK
+      - name: Verify Patch Result
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
-          APK="$FINAL_APK"
-
-          if [ ! -f "$APK" ]; then
-            echo "ERROR: Final APK not found."
+          if [ ! -s result.json ]; then
+            echo "ERROR: Patch result JSON is missing."
             exit 1
           fi
 
-          echo "Final APK:"
-          ls -lh "$APK"
+          cat result.json
 
-          echo ""
-          echo "APK information:"
-          file "$APK"
+          jq -e 'type == "object"' result.json >/dev/null
+
+          if jq -e '.. | objects | select(has("success")) | .success == false' \
+            result.json >/dev/null; then
+            echo "ERROR: Patch result reports a failure."
+            exit 1
+          fi
+
+          echo "Patch result JSON validated."
+
+      # -------------------------------------------------------
+      # Zipalign final APK
+      # -------------------------------------------------------
+      - name: Zipalign Final APK
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ALIGNED_APK="aligned-${FINAL_APK}"
+
+          "$ZIPALIGN" \
+            -P 16 \
+            -f \
+            4 \
+            "$FINAL_APK" \
+            "$ALIGNED_APK"
+
+          "$ZIPALIGN" -c -P 16 -v 4 "$ALIGNED_APK"
+
+          mv "$ALIGNED_APK" "$FINAL_APK"
+
+          echo "Final APK aligned successfully."
+          ls -lh "$FINAL_APK"
+
+      # -------------------------------------------------------
+      # Final APK verification
+      # -------------------------------------------------------
+      - name: Verify Final APK
+        if: steps.patch_check.outputs.changed == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s "$FINAL_APK"
+
+          aapt dump badging "$FINAL_APK" \
+            | tee final-apk-metadata.txt
+
+          grep -Fq \
+            "package: name='com.google.android.youtube'" \
+            final-apk-metadata.txt
+
+          echo "Final APK verification completed."
 
       # -------------------------------------------------------
       # Upload APK artifact
       # -------------------------------------------------------
-      - name: Upload APK artifact
+      - name: Upload APK Artifact
         if: steps.patch_check.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: YT-${{ env.YT_VERSION }}-Anddea-Beta-Patches-${{ env.PATCH_VERSION }}
+          name: YT-${{ env.YT_VERSION }}-Anddea-Beta-${{ env.PATCH_VERSION }}
           path: ${{ env.FINAL_APK }}
           if-no-files-found: error
+          retention-days: 14
 
       # -------------------------------------------------------
-      # Upload Anddea result
+      # Upload patch result
       # -------------------------------------------------------
-      - name: Upload Anddea patch result
+      - name: Upload Patch Result
         if: steps.patch_check.outputs.changed == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: Anddea-result-${{ env.YT_VERSION }}-${{ env.PATCH_VERSION }}
+          name: Anddea-Result-${{ env.YT_VERSION }}-${{ env.PATCH_VERSION }}
           path: result.json
-          if-no-files-found: warn
+          if-no-files-found: error
+          retention-days: 14
 
       # -------------------------------------------------------
       # Create GitHub Release
@@ -423,58 +464,44 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: yt-${{ env.YT_VERSION }}-anddea-beta-${{ env.PATCH_VERSION }}
-          name: YT ${{ env.YT_VERSION }} Anddea Beta - Patches ${{ env.PATCH_VERSION }}
-
-          # NORMAL RELEASE
+          name: YouTube ${{ env.YT_VERSION }} Anddea Beta - ${{ env.PATCH_VERSION }}
           prerelease: false
-
           body: |
-            YouTube ${{ env.YT_VERSION }}
+            YouTube Version: ${{ env.YT_VERSION }}
 
-            Patched with Anddea Beta patches.
+            Patch Repository: anddea/revanced-patches
+            Anddea Development Patch: ${{ env.PATCH_VERSION }}
 
-            Anddea DEV Patches:
-            ${{ env.PATCH_VERSION }}
+            Architecture: ARM64-v8a
 
-            Architecture:
-            ARM64-v8a
+            Source: APKMirror
+            Build: GitHub Actions
+            APK: Zipaligned and verified
 
-            Optimized:
-            Yes
-
-            Zipaligned:
-            Yes
-
-            Source:
-            APKMirror
-
-            Build:
-            Anddea Beta
-
-          files: |
-            ${{ env.FINAL_APK }}
+          files: ${{ env.FINAL_APK }}
 
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # -------------------------------------------------------
-      # Save successfully built patch version
+      # Save patch version only after successful release
       # -------------------------------------------------------
       - name: Save Anddea Patch Version
         if: steps.patch_check.outputs.changed == 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           echo "$PATCH_VERSION" > .anddea-patch-version
 
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add .anddea-patch-version
 
           if git diff --cached --quiet; then
-            echo "Patch version already saved."
+            echo "Patch version already recorded."
             exit 0
           fi
 
