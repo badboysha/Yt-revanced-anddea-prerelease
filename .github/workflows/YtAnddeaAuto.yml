@@ -26,24 +26,28 @@ jobs:
       # 1. Checkout repository
       - name: Checkout Repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       # 2. Java 21
-      - name: Setup Java 21
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      # 3. Android SDK
+      # 3. Node.js for APKCombo downloader
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # 4. Android SDK
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
           accept-android-sdk-licenses: "true"
           log-accepted-android-sdk-licenses: "false"
 
-      # 4. Install SDK packages separately
+      # 5. Install Android tools
       - name: Install Android Build Tools
         shell: bash
         run: |
@@ -76,49 +80,111 @@ jobs:
           AAPT="$SDK_ROOT/build-tools/35.0.0/aapt"
 
           test -x "$ZIPALIGN" || {
-            echo "::error::zipalign not found."
+            echo "::error::zipalign installation failed."
             exit 1
           }
 
           test -x "$AAPT" || {
-            echo "::error::aapt not found."
+            echo "::error::aapt installation failed."
             exit 1
           }
 
           echo "ZIPALIGN=$ZIPALIGN" >> "$GITHUB_ENV"
           echo "AAPT=$AAPT" >> "$GITHUB_ENV"
 
-      # 5. Download ARM64-compatible APKMirror bundle
-      - name: Download YouTube Bundle
-        uses: Yakov5776/gh-apkmirror-dl@v1.3
-        with:
-          org: google-inc
-          repo: youtube
-          version: "21.39.525"
-          bundle: true
-          filename: youtube-original.apkm
-          overwrite: true
-
-      # 6. Validate downloaded bundle
-      - name: Validate YouTube Bundle
+      # 6. Download the exact YouTube version for ARM64
+      - name: Download YouTube ARM64 APK
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ ! -s youtube-original.apkm ]; then
-            echo "::error::YouTube bundle was not downloaded."
+          DOWNLOAD_DIR="$GITHUB_WORKSPACE/downloads"
+          INSTALL_DIR="$RUNNER_TEMP/apkcombo"
+
+          mkdir -p "$DOWNLOAD_DIR" "$INSTALL_DIR"
+
+          npm install \
+            --prefix "$INSTALL_DIR" \
+            --no-audit \
+            --no-fund \
+            @nirewen/apkcombo-downloader
+
+          cat > "$INSTALL_DIR/download.mjs" <<'JS'
+          import { APKComboDownloader } from "@nirewen/apkcombo-downloader";
+
+          const version = process.env.YOUTUBE_VERSION;
+          const output = process.env.GITHUB_WORKSPACE + "/downloads";
+
+          const downloader = new APKComboDownloader({
+            arch: "arm64-v8a",
+            outDir: output
+          });
+
+          await downloader.download(
+            {
+              org: "youtube",
+              repo: "com.google.android.youtube"
+            },
+            {
+              version,
+              arch: "arm64-v8a",
+              type: "apk",
+              outFile: "youtube-original",
+              outDir: output
+            }
+          );
+
+          console.log("APKCombo download operation finished.");
+          JS
+
+          YOUTUBE_VERSION="$YOUTUBE_VERSION" \
+          GITHUB_WORKSPACE="$GITHUB_WORKSPACE" \
+            node "$INSTALL_DIR/download.mjs"
+
+          echo "Downloaded files:"
+          find "$DOWNLOAD_DIR" -maxdepth 3 -type f \
+            -printf '%p (%s bytes)\n'
+
+          APK="$(find "$DOWNLOAD_DIR" -maxdepth 3 \
+            -type f -iname '*.apk' -size +1M \
+            | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::No APK was downloaded."
+            echo "The requested version may be unavailable on APKCombo."
             exit 1
           fi
 
-          if ! unzip -t youtube-original.apkm; then
-            echo "::error::Downloaded bundle is not a valid ZIP/APKM file."
+          cp "$APK" youtube-original.apk
+
+          test -s youtube-original.apk
+
+      # 7. Validate package and version
+      - name: Validate Original APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$AAPT" dump badging youtube-original.apk \
+            > original-badging.txt
+
+          if ! grep -q "^package: name='com.google.android.youtube'" \
+            original-badging.txt; then
+            echo "::error::Downloaded package is not YouTube."
+            cat original-badging.txt
             exit 1
           fi
 
-          echo "Bundle contents:"
-          unzip -Z1 youtube-original.apkm | head -n 60
+          if ! grep -q "versionName='$YOUTUBE_VERSION'" \
+            original-badging.txt; then
+            echo "::error::Downloaded version does not match $YOUTUBE_VERSION."
+            cat original-badging.txt
+            exit 1
+          fi
 
-      # 7. Download latest Morphe Desktop JAR
+          echo "Validated YouTube version $YOUTUBE_VERSION."
+
+      # 8. Download latest Morphe Desktop CLI
       - name: Download Morphe Desktop
         shell: bash
         env:
@@ -134,7 +200,7 @@ jobs:
             "https://api.github.com/repos/MorpheApp/morphe-desktop/releases/latest" \
             -o morphe-release.json
 
-          DOWNLOAD_URL="$(
+          JAR_URL="$(
             jq -r '
               [
                 .assets[]
@@ -144,47 +210,59 @@ jobs:
             ' morphe-release.json
           )"
 
-          if [ -z "$DOWNLOAD_URL" ]; then
+          if [ -z "$JAR_URL" ]; then
             echo "::error::Morphe all.jar asset was not found."
             jq -r '.html_url, (.assets[]?.name)' morphe-release.json
             exit 1
           fi
 
-          echo "Downloading Morphe Desktop."
-
           curl --fail --silent --show-error --location \
-            "$DOWNLOAD_URL" \
+            "$JAR_URL" \
             -o tools/morphe-desktop.jar
 
           test -s tools/morphe-desktop.jar
 
           java -jar tools/morphe-desktop.jar --version
 
-      # 8. Patch YouTube using Anddea patches
+      # 9. Align input APK
+      - name: Align Original APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "$ZIPALIGN" -f -v 4 \
+            youtube-original.apk \
+            youtube-aligned.apk
+
+          "$ZIPALIGN" -c -v 4 youtube-aligned.apk
+
+      # 10. Patch using Anddea
       - name: Patch YouTube
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p output
+          export MORPHE_DATA_DIR="$RUNNER_TEMP/morphe-data"
 
           java -Xms512m -Xmx5g \
             -jar tools/morphe-desktop.jar \
             patch \
-            -p "$PATCHES_REPO" \
+            --patches "$PATCHES_REPO" \
             --prerelease \
-            -o output/youtube-anddea.apk \
-            -r output/result.json \
+            --out "$GITHUB_WORKSPACE/output/youtube-anddea.apk" \
+            --result-file "$GITHUB_WORKSPACE/output/result.json" \
             --striplibs "arm64-v8a" \
             --bytecode-mode "STRIP_SAFE" \
-            youtube-original.apkm
+            --verify-with-sdk "$ANDROID_HOME" \
+            "$GITHUB_WORKSPACE/youtube-aligned.apk"
 
           if [ ! -s output/youtube-anddea.apk ]; then
-            echo "::error::Morphe did not produce the output APK."
+            echo "::error::Patched APK was not generated."
             exit 1
           fi
 
-      # 9. Validate patched APK
+      # 11. Validate final APK
       - name: Validate Patched APK
         shell: bash
         run: |
@@ -197,25 +275,23 @@ jobs:
 
           if ! grep -q "^package: name='com.google.android.youtube'" \
             output/patched-badging.txt; then
-            echo "::error::Output is not the expected YouTube APK."
+            echo "::error::Invalid output package."
             cat output/patched-badging.txt
             exit 1
           fi
 
-          echo "Verified package:"
-          grep "^package:" output/patched-badging.txt
-
-          # Morphe normally aligns and signs its patched output.
           "$ZIPALIGN" -c -v 4 "$APK"
 
           sha256sum "$APK" > output/SHA256SUMS.txt
 
+          echo "Final APK validated."
+          grep "^package:" output/patched-badging.txt
+
           if [ -f output/result.json ]; then
-            echo "Patch result:"
             cat output/result.json
           fi
 
-      # 10. Upload workflow artifact
+      # 12. Upload artifact
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -227,21 +303,21 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # 11. Publish GitHub Release
+      # 13. Create GitHub Release
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: youtube-${{ env.YOUTUBE_VERSION }}-run-${{ github.run_number }}
           name: Anddea YouTube ARM64 ${{ env.YOUTUBE_VERSION }} Build ${{ github.run_number }}
           body: |
-            Automated Anddea YouTube build.
+            Automated YouTube patch build.
 
             YouTube version: ${{ env.YOUTUBE_VERSION }}
-            Architecture target: arm64-v8a
-            Patches: ${{ env.PATCHES_REPO }}
+            Architecture: arm64-v8a
+            Patch repository: ${{ env.PATCHES_REPO }}
             Patcher: Morphe Desktop
 
-            Check the workflow logs and SHA256SUMS.txt before installation.
+            Check SHA256SUMS.txt and workflow logs before installing.
           files: |
             output/youtube-anddea.apk
             output/SHA256SUMS.txt
